@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>My First 3D Scene</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; }
+    #buttons {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      display: flex;
+      gap: 10px;
+      z-index: 10;
+      flex-wrap: wrap;
+      max-width: 60%;
+    }
+    button, #loadBtn {
+      padding: 10px 16px;
+      font-size: 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      color: white;
+      background: #6c757d;
+    }
+    #loadBtn { background: #3a86ff; }
+    #status {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      background: rgba(255, 255, 255, 0.9);
+      padding: 8px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      z-index: 10;
+      max-width: 60%;
+    }
+    .hint {
+      position: absolute;
+      bottom: 20px;
+      right: 20px;
+      background: rgba(0,0,0,0.65);
+      color: #fff;
+      padding: 8px 14px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.5;
+      pointer-events: none;
+      z-index: 10;
+    }
+    .hint kbd {
+      background: #444;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    #loading {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0,0,0,0.7);
+      color: #fff;
+      padding: 16px 28px;
+      border-radius: 8px;
+      font-size: 15px;
+      z-index: 20;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="buttons">
+    <button style="background: #e63946;" onclick="setColor(0xe63946)">Red</button>
+    <button style="background: #2a9d8f;" onclick="setColor(0x2a9d8f)">Teal</button>
+    <button style="background: #457b9d;" onclick="setColor(0x457b9d)">Blue</button>
+    <button style="background: #f4a261;" onclick="setColor(0xf4a261)">Orange</button>
+    <button style="background: #8d99ae;" onclick="setColor(0x8d99ae)">Grey</button>
+    <button style="background: #ffd166; color:#333;" onclick="setColor(0xffd166)">Gold</button>
+    <label id="loadBtn">
+      Load GLB…
+      <input type="file" id="fileInput" accept=".glb,.gltf" style="display: none;">
+    </label>
+  </div>
+
+  <div id="loading">Loading default model…</div>
+  <div id="status">Initializing…</div>
+  <div class="hint">
+    <kbd>Left-drag</kbd> rotate · <kbd>Right-drag</kbd> pan · <kbd>Scroll</kbd> zoom · <kbd>Esc</kbd> reset colors
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+    // =================================================================
+    // 🔧 DEFAULT MODEL — Car.glb in the same folder as index.html
+    // =================================================================
+    const DEFAULT_MODEL_URL = './Car.glb';
+    // =================================================================
+
+    // ---------------------------------------------------------------
+    // 1. SCENE + RENDERER
+    // ---------------------------------------------------------------
+    const scene = new THREE.Scene();
+
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      window.innerWidth / window.innerHeight,
+      0.1,
+      1000
+    );
+    const DEFAULT_CAM_POS = new THREE.Vector3(0, 1.2, 3.5);
+    const DEFAULT_LOOK_AT = new THREE.Vector3(0, 0.75, 0);
+    camera.position.copy(DEFAULT_CAM_POS);
+    camera.lookAt(DEFAULT_LOOK_AT);
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.0;
+
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    document.body.appendChild(renderer.domElement);
+
+    // ---------------------------------------------------------------
+    // 2. ENVIRONMENT MAP (IBL — this is the "HDRI")
+    // ---------------------------------------------------------------
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    pmremGenerator.compileEquirectangularShader();
+
+    const roomEnv = new RoomEnvironment();
+    const envRT = pmremGenerator.fromScene(roomEnv, 0.04);
+    const environmentTexture = envRT.texture;
+
+    scene.environment = environmentTexture;
+    scene.environmentIntensity = 1.0;
+
+    // ---------------------------------------------------------------
+    // 3. HOLDER
+    // ---------------------------------------------------------------
+    const holder = new THREE.Group();
+    holder.position.y = 0.75;
+    scene.add(holder);
+
+    // ---------------------------------------------------------------
+    // 4. GLB LOADING
+    // ---------------------------------------------------------------
+    const loader = new GLTFLoader();
+    const clock = new THREE.Clock();
+    const status = document.getElementById('status');
+    const loadingEl = document.getElementById('loading');
+    let mixer = null;
+    let currentModel = null;
+
+    const originalColors = new WeakMap();
+
+    function clearHolder() {
+      while (holder.children.length > 0) {
+        holder.remove(holder.children[0]);
+      }
+    }
+
+    function enhanceMaterials(root) {
+      root.traverse((obj) => {
+        if (!obj.isMesh) return;
+
+        obj.castShadow = true;
+        obj.receiveShadow = true;
+
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of materials) {
+          if (!mat) continue;
+
+          if (mat.map) mat.map.colorSpace = THREE.SRGBColorSpace;
+          if (mat.emissiveMap) mat.emissiveMap.colorSpace = THREE.SRGBColorSpace;
+
+          for (const key of ['map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap']) {
+            if (mat[key]) mat[key].anisotropy = renderer.capabilities.getMaxAnisotropy();
+          }
+
+          if (mat.isMeshStandardMaterial || mat.isMeshPhysicalMaterial) {
+            mat.envMapIntensity = 1.5;
+          }
+          mat.needsUpdate = true;
+        }
+      });
+    }
+
+    function loadModel(source, label) {
+      const isFile = source instanceof File || source instanceof Blob;
+      const url = isFile ? URL.createObjectURL(source) : source;
+
+      loader.load(
+        url,
+        (gltf) => {
+          const model = gltf.scene;
+          enhanceMaterials(model);
+
+          const box = new THREE.Box3().setFromObject(model);
+          const size = box.getSize(new THREE.Vector3());
+          const maxDim = Math.max(size.x, size.y, size.z);
+          const scale = 1.5 / maxDim;
+          model.scale.setScalar(scale);
+
+          const box2 = new THREE.Box3().setFromObject(model);
+          const center2 = box2.getCenter(new THREE.Vector3());
+          model.position.x = -center2.x;
+          model.position.z = -center2.z;
+          model.position.y = -box2.min.y;
+
+          clearHolder();
+          holder.add(model);
+          currentModel = model;
+
+          resetView();
+
+          if (gltf.animations.length > 0) {
+            mixer = new THREE.AnimationMixer(model);
+            mixer.clipAction(gltf.animations[0]).play();
+            status.textContent = `Loaded "${label}" — playing animation 1 of ${gltf.animations.length}`;
+          } else {
+            mixer = null;
+            status.textContent = `Loaded "${label}" — no animations`;
+          }
+
+          loadingEl.style.display = 'none';
+          if (isFile) URL.revokeObjectURL(url);
+        },
+        (xhr) => {
+          if (xhr.total) {
+            const pct = Math.round((xhr.loaded / xhr.total) * 100);
+            loadingEl.textContent = `Loading ${label}… ${pct}%`;
+          } else {
+            loadingEl.textContent = `Loading ${label}…`;
+          }
+        },
+        (err) => {
+          status.textContent = `Failed to load "${label}" — check the URL or file.`;
+          loadingEl.style.display = 'none';
+          console.error(err);
+        }
+      );
+    }
+
+    document.getElementById('fileInput').addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (file) loadModel(file, file.name);
+      e.target.value = '';
+    });
+
+    // ---------------------------------------------------------------
+    // 5. COLOR TINT
+    // ---------------------------------------------------------------
+    window.setColor = function (hex) {
+      if (!currentModel) {
+        status.textContent = 'Load a model first!';
+        return;
+      }
+      const color = new THREE.Color(hex);
+      currentModel.traverse((obj) => {
+        if (!obj.isMesh) return;
+        const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const mat of mats) {
+          if (!mat) continue;
+          if (mat.color) {
+            if (!originalColors.has(mat)) originalColors.set(mat, mat.color.clone());
+            mat.color.copy(color);
+            mat.needsUpdate = true;
+          }
+        }
+      });
+      status.textContent = `Tinted model with #${hex.toString(16).padStart(6, '0')}`;
+    };
+
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && currentModel) {
+        currentModel.traverse((obj) => {
+          if (!obj.isMesh) return;
+          const mats = Array.isArray(obj.material) ? obj.material : [obj.material];
+          for (const mat of mats) {
+            if (mat && originalColors.has(mat)) {
+              mat.color.copy(originalColors.get(mat));
+              mat.needsUpdate = true;
+            }
+          }
+        });
+        status.textContent = 'Restored original colors';
+      }
+    });
+
+    // ---------------------------------------------------------------
+    // 6. VIEW RESET
+    // ---------------------------------------------------------------
+    function resetView() {
+      camera.position.copy(DEFAULT_CAM_POS);
+      camera.lookAt(DEFAULT_LOOK_AT);
+      panTarget.set(0, 0.75, 0);
+      // Clear any residual spin when resetting the view
+      yawVelocity = 0;
+      pitchVelocity = 0;
+      holder.rotation.set(0, 0, 0);
+    }
+
+    // ---------------------------------------------------------------
+    // 7. CONTROLS (with momentum / inertia)
+    // ---------------------------------------------------------------
+    const panTarget = new THREE.Vector3(0, 0.75, 0);
+
+    let isDragging = false;
+    let isPanning = false;
+    let prevX = 0, prevY = 0;
+
+    // --- Momentum state ---
+    // We track the camera orbit as yaw/pitch *deltas* and remember
+    // how fast they were changing at the moment of release.
+    let yawVelocity = 0;      // radians per second
+    let pitchVelocity = 0;    // radians per second
+    const MOMENTUM_FRICTION = 0.94;   // multiplied per frame at 60fps (lower = stops faster)
+    const MIN_VELOCITY = 0.0005;      // below this, momentum stops entirely
+    const MAX_VELOCITY = 6.0;         // clamp so a fast flick doesn't spin forever
+
+    const _right = new THREE.Vector3();
+    const _up = new THREE.Vector3();
+
+    // Helper: rotate the camera around panTarget by yaw & pitch radians
+    function orbitCamera(yaw, pitch) {
+      const offset = new THREE.Vector3().subVectors(camera.position, panTarget);
+
+      const yawQuat = new THREE.Quaternion().setFromAxisAngle(
+        new THREE.Vector3(0, 1, 0), yaw
+      );
+      offset.applyQuaternion(yawQuat);
+
+      const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+      const pitchQuat = new THREE.Quaternion().setFromAxisAngle(right, pitch);
+      const offsetAfter = offset.clone().applyQuaternion(pitchQuat);
+
+      const up = new THREE.Vector3(0, 1, 0);
+      const dir = offsetAfter.clone().normalize();
+      if (Math.abs(dir.dot(up)) < 0.98) {
+        offset.copy(offsetAfter);
+      }
+
+      camera.position.copy(panTarget.clone().add(offset));
+      camera.lookAt(panTarget);
+    }
+
+    renderer.domElement.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    renderer.domElement.addEventListener('pointerdown', (e) => {
+      isDragging = true;
+      isPanning = e.button === 2 || e.button === 1;
+      prevX = e.clientX;
+      prevY = e.clientY;
+
+      // Kill momentum the moment the user grabs the scene again
+      yawVelocity = 0;
+      pitchVelocity = 0;
+
+      renderer.domElement.style.cursor = 'grabbing';
+      renderer.domElement.setPointerCapture(e.pointerId);
+    });
+
+    window.addEventListener('pointerup', (e) => {
+      isDragging = false;
+      isPanning = false;
+      renderer.domElement.style.cursor = 'default';
+      if (renderer.domElement.hasPointerCapture?.(e.pointerId)) {
+        renderer.domElement.releasePointerCapture(e.pointerId);
+      }
+    });
+
+    window.addEventListener('pointermove', (e) => {
+      if (!isDragging) return;
+
+      const dx = e.clientX - prevX;
+      const dy = e.clientY - prevY;
+      prevX = e.clientX;
+      prevY = e.clientY;
+
+      if (isPanning) {
+        camera.updateMatrixWorld();
+        _right.setFromMatrixColumn(camera.matrixWorld, 0);
+        _up.setFromMatrixColumn(camera.matrixWorld, 1);
+
+        const dist = camera.position.distanceTo(panTarget);
+        const panSpeed = dist * 0.0015;
+
+        const offset = new THREE.Vector3()
+          .addScaledVector(_right, -dx * panSpeed)
+          .addScaledVector(_up, dy * panSpeed);
+
+        camera.position.add(offset);
+        panTarget.add(offset);
+      } else {
+        const rotSpeed = 0.01;
+        const yaw = -dx * rotSpeed;
+        const pitch = -dy * rotSpeed;
+
+        orbitCamera(yaw, pitch);
+
+        // Store velocity in rad/sec. We assume ~60fps for the drag sample.
+        // (pointermove fires at ~display refresh rate; using a fixed dt of 1/60
+        //  here keeps the momentum feel stable across most machines.)
+        const dt = 1 / 60;
+        yawVelocity = THREE.MathUtils.clamp(yaw / dt, -MAX_VELOCITY, MAX_VELOCITY);
+        pitchVelocity = THREE.MathUtils.clamp(pitch / dt, -MAX_VELOCITY, MAX_VELOCITY);
+      }
+    });
+
+    renderer.domElement.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const dir = new THREE.Vector3().subVectors(camera.position, panTarget).normalize();
+      const dist = camera.position.distanceTo(panTarget);
+      const factor = e.deltaY > 0 ? 1.12 : 0.89;
+      const newDist = THREE.MathUtils.clamp(dist * factor, 0.5, 30);
+      camera.position.copy(panTarget.clone().add(dir.multiplyScalar(newDist)));
+      camera.lookAt(panTarget);
+    }, { passive: false });
+
+    // ---------------------------------------------------------------
+    // 8. RENDER LOOP (momentum applied here)
+    // ---------------------------------------------------------------
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      // Clamp delta so a tab-switch stall doesn't launch the camera into orbit
+      const dt = Math.min(delta, 1 / 30);
+
+      // Apply momentum only when the user isn't actively dragging.
+      // Panning should NOT get momentum — only rotation.
+      if (!isDragging && !isPanning && (Math.abs(yawVelocity) > MIN_VELOCITY || Math.abs(pitchVelocity) > MIN_VELOCITY)) {
+        orbitCamera(yawVelocity * dt, pitchVelocity * dt);
+
+        // Exponential friction, framerate-independent
+        const friction = Math.pow(MOMENTUM_FRICTION, dt * 60);
+        yawVelocity *= friction;
+        pitchVelocity *= friction;
+
+        if (Math.abs(yawVelocity) < MIN_VELOCITY) yawVelocity = 0;
+        if (Math.abs(pitchVelocity) < MIN_VELOCITY) pitchVelocity = 0;
+      }
+
+      if (mixer) mixer.update(delta);
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // ---------------------------------------------------------------
+    // 9. RESIZE
+    // ---------------------------------------------------------------
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    });
+
+    // ---------------------------------------------------------------
+    // 10. KICK OFF
+    // ---------------------------------------------------------------
+    if (DEFAULT_MODEL_URL) {
+      loadingEl.style.display = 'block';
+      loadingEl.textContent = 'Loading default model…';
+      const label = DEFAULT_MODEL_URL.split('/').pop() || 'default model';
+      loadModel(DEFAULT_MODEL_URL, label);
+    } else {
+      status.textContent = 'No model loaded — click "Load GLB…"';
+    }
+  </script>
+</body>
+</html>
